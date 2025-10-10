@@ -6,7 +6,8 @@
 - **Issue Labels**: 이슈 할당에 알맞은 라벨과 자동 연동 워크플로우
 - **Github Action workflow**: 자체 서버에 배포할 수 있는 자동화 된 워크플로우
 
-### 🚀Quick Start
+## 🚀Quick Start
+화면 상단의 `Use this template`을 클릭합니다.
 
 
 ## ⚙️Setup
