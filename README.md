@@ -20,10 +20,12 @@
 | DOCKERHUB_TOKEN | DockerHub 액세스 토큰 |
 | SERVER_HOST | 배포 대상 서버 IP/도메인 |
 | SERVER_USER | 서버 SSH 접속 사용자명 |
-| SERVER_PASSWORD | 서버 SSH 접속 비밀번호 |
-| ENV | .env 파일 전체 내용 복사본 |
+| SERVER_SSH_KEY | 서버 SSH 공개키 |
+| SERVER_PORT | 서버 SSH 접속 포트 |
+| PROJECT_ENV | 프로젝트 .env 파일 전체 내용 복사본 |
+| DEPLOY_ENV | 배포 세부 설정(하단 참고) |
 
-#### `.github/config/deploy.env` 설정
+#### `DEPLOY_ENV` 설정
 
 | 변수명 | 설명 |
 |--------|------|
