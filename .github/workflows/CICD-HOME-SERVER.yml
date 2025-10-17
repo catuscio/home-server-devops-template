@@ -24,14 +24,6 @@ jobs:
   build:
     name: 애플리케이션 빌드
     runs-on: ubuntu-latest
-    outputs:
-      project_name: ${{ steps.config.outputs.PROJECT_NAME }}
-      project_base_path: ${{ steps.config.outputs.PROJECT_BASE_PATH }}
-      project_folder_name: ${{ steps.config.outputs.PROJECT_FOLDER_NAME }}
-      project_sub_path: ${{ steps.config.outputs.PROJECT_SUB_PATH }}
-      production_port: ${{ steps.config.outputs.PRODUCTION_PORT }}
-      development_port: ${{ steps.config.outputs.DEVELOPMENT_PORT }}
-      test_port: ${{ steps.config.outputs.TEST_PORT }}
      
     steps:
       - name: 코드 체크아웃
@@ -96,6 +88,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: deploy.env 파일 생성
+        run: echo "${{ secrets.DEPLOY_ENV }}" > .github/config/deploy.env
+
+      - name: 배포 설정 로드
+        id: config
+        run: |
+          echo "📄 deploy.env 파일에서 설정을 로드합니다..."
+          while IFS='=' read -r key value; do
+            if [[ ! $key =~ ^#.*$ ]] && [[ -n $key ]] && [[ ! $key =~ ^[[:space:]]*$ ]]; then
+              key=$(echo "$key" | xargs)
+              value=$(echo "$value" | xargs)
+              echo "${key}=${value}" >> $GITHUB_OUTPUT
+            fi
+          done < .github/config/deploy.env
+
       - name: Deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -111,13 +121,13 @@ jobs:
             # ============================================================
             echo "🔧 배포 설정 로드 중..."
             BRANCH="${{ github.ref_name }}"
-            PROJECT_NAME="${{ needs.build.outputs.project_name }}"
-            PROJECT_BASE_PATH="${{ needs.build.outputs.project_base_path }}"
-            PROJECT_FOLDER_NAME="${{ needs.build.outputs.project_folder_name }}"
-            PROJECT_SUB_PATH="${{ needs.build.outputs.project_sub_path }}"
-            PRODUCTION_PORT="${{ needs.build.outputs.production_port }}"
-            DEVELOPMENT_PORT="${{ needs.build.outputs.development_port }}"
-            TEST_PORT="${{ needs.build.outputs.test_port }}"
+            PROJECT_NAME="${{ steps.config.outputs.PROJECT_NAME }}"
+            PROJECT_BASE_PATH="${{ steps.config.outputs.PROJECT_BASE_PATH }}"
+            PROJECT_FOLDER_NAME="${{ steps.config.outputs.PROJECT_FOLDER_NAME }}"
+            PROJECT_SUB_PATH="${{ steps.config.outputs.PROJECT_SUB_PATH }}"
+            PRODUCTION_PORT="${{ steps.config.outputs.PRODUCTION_PORT }}"
+            DEVELOPMENT_PORT="${{ steps.config.outputs.DEVELOPMENT_PORT }}"
+            TEST_PORT="${{ steps.config.outputs.TEST_PORT }}"
             HOST_MOUNT_PATH="${PROJECT_BASE_PATH}/${PROJECT_FOLDER_NAME}/${PROJECT_SUB_PATH}"
             CONTAINER_MOUNT_PATH="/mnt/${PROJECT_FOLDER_NAME}"
 
@@ -191,6 +201,9 @@ jobs:
             # 호스트 디렉토리 준비
             # ============================================================
             echo "📂 컨테이너에 연결할 호스트 디렉토리를 준비합니다..."
+            echo "DEBUG: PROJECT_BASE_PATH='$PROJECT_BASE_PATH'"
+            echo "DEBUG: HOST_MOUNT_PATH='$HOST_MOUNT_PATH'"
+
             mkdir -p "$HOST_MOUNT_PATH"
 
             # ============================================================
