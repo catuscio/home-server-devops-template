@@ -1,9 +1,9 @@
 ---
-name: "\U00002728️기능 개선"
+name: "✨️기능 개선"
 about: 기능 강화 혹은 개선
-title: "[\U00002728️Ehancement]"
-labels: Ehancement
-assignees: 
+title: "[✨Enhancement]"
+labels: Enhancement
+assignees:
 
 ---
 
