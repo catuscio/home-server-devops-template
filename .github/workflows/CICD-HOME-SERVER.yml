@@ -17,6 +17,13 @@ on:
       - test     # 테스트 환경 배포
   workflow_dispatch:   # 수동 실행 허용
 
+# ===================================================================
+# 동시 배포 방지
+# ===================================================================
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   # ===================================================================
   # 빌드 작업
@@ -24,7 +31,7 @@ jobs:
   build:
     name: 애플리케이션 빌드
     runs-on: ubuntu-latest
-     
+
     steps:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
@@ -44,6 +51,17 @@ jobs:
             fi
           done < .github/config/deploy.env
 
+          # 필수 설정값 검증
+          source .github/config/deploy.env
+          if [ -z "$PROJECT_NAME" ]; then echo "❌ PROJECT_NAME이 비어 있습니다."; exit 1; fi
+          if [ -z "$PROJECT_BASE_PATH" ]; then echo "❌ PROJECT_BASE_PATH가 비어 있습니다."; exit 1; fi
+          if [ -z "$PROJECT_FOLDER_NAME" ]; then echo "❌ PROJECT_FOLDER_NAME이 비어 있습니다."; exit 1; fi
+
+          # DEPLOY_MODE 기본값 설정
+          if [ -z "$DEPLOY_MODE" ]; then
+            echo "DEPLOY_MODE=single" >> $GITHUB_OUTPUT
+          fi
+
       - name: Docker 빌드환경 설정
         uses: docker/setup-buildx-action@v3
 
@@ -57,8 +75,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile') }}
+          key: ${{ runner.os }}-buildx-${{ github.ref_name }}-${{ hashFiles('Dockerfile', '**/requirements*.txt', '**/pyproject.toml', '**/package-lock.json', '**/go.sum') }}
           restore-keys: |
+            ${{ runner.os }}-buildx-${{ github.ref_name }}-
             ${{ runner.os }}-buildx-
 
       - name: Docker 이미지 빌드 및 푸시
@@ -75,7 +94,7 @@ jobs:
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-      
+
       - name: 빌드 작업 완료 로그
         run: echo "🪄 모든 빌드 작업이 성공적으로 완료되었습니다."
 
@@ -106,6 +125,23 @@ jobs:
             fi
           done < .github/config/deploy.env
 
+          # DEPLOY_MODE 기본값 설정
+          source .github/config/deploy.env
+          if [ -z "$DEPLOY_MODE" ]; then
+            echo "DEPLOY_MODE=single" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Docker Compose 파일 전송
+        if: ${{ steps.config.outputs.DEPLOY_MODE == 'compose' }}
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          source: "docker-compose.yml"
+          target: "${{ steps.config.outputs.PROJECT_BASE_PATH }}/${{ steps.config.outputs.PROJECT_FOLDER_NAME }}"
+
       - name: Deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -125,11 +161,19 @@ jobs:
             PROJECT_BASE_PATH="${{ steps.config.outputs.PROJECT_BASE_PATH }}"
             PROJECT_FOLDER_NAME="${{ steps.config.outputs.PROJECT_FOLDER_NAME }}"
             PROJECT_SUB_PATH="${{ steps.config.outputs.PROJECT_SUB_PATH }}"
+            CONTAINER_PORT="${{ steps.config.outputs.CONTAINER_PORT }}"
             PRODUCTION_PORT="${{ steps.config.outputs.PRODUCTION_PORT }}"
             DEVELOPMENT_PORT="${{ steps.config.outputs.DEVELOPMENT_PORT }}"
             TEST_PORT="${{ steps.config.outputs.TEST_PORT }}"
             HOST_MOUNT_PATH="${PROJECT_BASE_PATH}/${PROJECT_FOLDER_NAME}/${PROJECT_SUB_PATH}"
             CONTAINER_MOUNT_PATH="/mnt/${PROJECT_FOLDER_NAME}"
+
+            # ============================================================
+            # 필수 설정값 검증
+            # ============================================================
+            if [ -z "$PROJECT_NAME" ]; then echo "❌ PROJECT_NAME이 비어 있습니다."; exit 1; fi
+            if [ -z "$PROJECT_BASE_PATH" ]; then echo "❌ PROJECT_BASE_PATH가 비어 있습니다."; exit 1; fi
+            if [ -z "$PROJECT_FOLDER_NAME" ]; then echo "❌ PROJECT_FOLDER_NAME이 비어 있습니다."; exit 1; fi
 
             # ============================================================
             # 브랜치별 포트 및 컨테이너명 설정
@@ -155,78 +199,161 @@ jobs:
             fi
 
             # ============================================================
-            # 최종 배포 설정 요약 (보안 강화 버전)
+            # 최종 배포 설정 요약
             # ============================================================
+            DEPLOY_MODE="${{ steps.config.outputs.DEPLOY_MODE }}"
+            DOCKER_IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/${PROJECT_NAME}:${BRANCH}"
+
             echo "--- 📋 최종 배포 설정 적용 완료 ---"
             echo "  - 배포 환경: 🏘️ ${DEPLOY_ENV_NAME}"
             echo "  - 대상 브랜치: 🪵 ${BRANCH}"
+            echo "  - 배포 모드: 📦 ${DEPLOY_MODE}"
             echo "  - 적용된 컨테이너 이름: 📦 ${CONTAINER_NAME}"
             echo "------------------------------------"
 
-            # ============================================================
-            # 🔑 원격 서버에 .env 파일 생성
-            # ============================================================
-            # Docker run 명령어에 추가할 --env-file 옵션을 저장할 변수
-            ENV_FILE_OPTION=""
-            
-            # GitHub Secrets에 ENV가 존재하는지 확인
-            if [ -n "${{ secrets.PROJECT_ENV }}" ]; then
-              echo "📝 GitHub Secrets에 PROJECT_ENV가 존재합니다. 원격 서버에 .env 파일을 생성합니다..."
-              echo "${{ secrets.PROJECT_ENV }}" > .env
-              ENV_FILE_OPTION="--env-file .env" # 변수가 존재할 경우에만 옵션 추가
-              echo "✅ .env 파일이 성공적으로 생성되었습니다."
+            if [ "$DEPLOY_MODE" = "compose" ]; then
+              # ============================================================
+              # Compose 모드 배포
+              # ============================================================
+              PROJECT_DIR="${PROJECT_BASE_PATH}/${PROJECT_FOLDER_NAME}"
+              cd "$PROJECT_DIR"
+
+              # .env 파일에 배포 변수 추가 (compose 치환용)
+              DEPLOY_VARS="DOCKER_IMAGE=${DOCKER_IMAGE}
+HOST_PORT=${PORT}
+CONTAINER_PORT=${CONTAINER_PORT:-8000}
+HOST_MOUNT_PATH=${HOST_MOUNT_PATH}
+CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
+
+              if [ -n "${{ secrets.PROJECT_ENV }}" ]; then
+                echo "${DEPLOY_VARS}" > .env
+                echo "" >> .env
+                echo "${{ secrets.PROJECT_ENV }}" >> .env
+              else
+                echo "${DEPLOY_VARS}" > .env
+              fi
+              chmod 600 .env
+
+              # Docker Compose Pull & Deploy
+              echo "⬇️ Docker Compose 이미지를 가져옵니다..."
+              docker compose pull
+
+              echo "⚠️ 기존 서비스를 정상 종료합니다..."
+              docker compose down --timeout 10 || true
+
+              echo "🚀 Docker Compose 서비스를 시작합니다..."
+              docker compose up -d
+
+              # Health Check
+              echo "🏥 서비스 상태를 확인합니다..."
+              sleep 3
+              for i in $(seq 1 10); do
+                RUNNING=$(docker compose ps --status running --format json | wc -l)
+                TOTAL=$(docker compose ps --format json | wc -l)
+                if [ "$RUNNING" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+                  echo "✅ 모든 서비스가 정상적으로 실행 중입니다. ($RUNNING/$TOTAL)"
+                  break
+                fi
+                if [ "$i" -eq 10 ]; then
+                  echo "❌ 일부 서비스가 시작되지 않았습니다. ($RUNNING/$TOTAL)"
+                  docker compose ps
+                  docker compose logs --tail 20
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              docker image prune -f
+
+              echo "🥂 배포가 성공적으로 완료되었습니다. (Compose 모드)"
+
             else
-              echo "ℹ️ GitHub Secrets에 PROJECT_ENV가 존재하지 않습니다. .env 파일 생성을 건너뜁니다."
+              # ============================================================
+              # Single 모드 배포 (기존 로직)
+              # ============================================================
+
+              # 🔑 원격 서버에 .env 파일 생성
+              ENV_FILE_OPTION=""
+              if [ -n "${{ secrets.PROJECT_ENV }}" ]; then
+                echo "📝 GitHub Secrets에 PROJECT_ENV가 존재합니다. 원격 서버에 .env 파일을 생성합니다..."
+                echo "${{ secrets.PROJECT_ENV }}" > .env
+                chmod 600 .env
+                ENV_FILE_OPTION="--env-file .env"
+                echo "✅ .env 파일이 성공적으로 생성되었습니다."
+              else
+                echo "ℹ️ GitHub Secrets에 PROJECT_ENV가 존재하지 않습니다. .env 파일 생성을 건너뜁니다."
+              fi
+
+              # Docker 이미지 풀 (Pull)
+              echo "⬇️ 배포할 Docker 이미지를 가져옵니다..."
+              docker pull "${DOCKER_IMAGE}"
+
+              # 기존 컨테이너 Graceful Shutdown
+              echo "🧹 기존 배포 컨테이너의 존재 여부를 확인합니다..."
+              if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}$"; then
+                echo "📋 기존 컨테이너 로그를 백업합니다..."
+                docker logs --tail 500 "$CONTAINER_NAME" > "${HOST_MOUNT_PATH}/container-$(date +%Y%m%d-%H%M%S).log" 2>&1 || true
+                echo "⚠️ 기존 컨테이너를 정상 종료합니다..."
+                docker stop --time 10 "$CONTAINER_NAME" || true
+                docker rm "$CONTAINER_NAME" || true
+                echo "✅ 기존 컨테이너가 성공적으로 정리되었습니다."
+              else
+                echo "ℹ️ 새로 배포할 컨테이너와 이름이 같은 기존 컨테이너가 없습니다."
+              fi
+
+              # 호스트 디렉토리 준비
+              echo "📂 컨테이너에 연결할 호스트 디렉토리를 준비합니다..."
+              mkdir -p "$HOST_MOUNT_PATH"
+
+              # 새 컨테이너 실행
+              echo "🚀 새로운 애플리케이션 컨테이너를 실행합니다..."
+              docker run -d \
+                --restart unless-stopped \
+                --log-opt max-size=10m \
+                --log-opt max-file=3 \
+                -p "${PORT}:${CONTAINER_PORT:-8000}" \
+                --name "$CONTAINER_NAME" \
+                $ENV_FILE_OPTION \
+                -e TZ=Asia/Seoul \
+                -v /etc/localtime:/etc/localtime:ro \
+                -v "${HOST_MOUNT_PATH}:${CONTAINER_MOUNT_PATH}" \
+                "${DOCKER_IMAGE}"
+
+              # Health Check
+              echo "🏥 컨테이너 상태를 확인합니다..."
+              sleep 3
+              for i in $(seq 1 10); do
+                if docker ps --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}$"; then
+                  echo "✅ 컨테이너가 정상적으로 실행 중입니다."
+                  break
+                fi
+                if [ "$i" -eq 10 ]; then
+                  echo "❌ 컨테이너가 시작되지 않았습니다. 최근 로그:"
+                  docker logs "$CONTAINER_NAME" 2>&1 | tail -20 || true
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              # 사용하지 않는 Docker 이미지 정리
+              echo "🧹 사용하지 않는 Docker 이미지를 정리합니다..."
+              docker image prune -f
+
+              echo "🥂 배포가 성공적으로 완료되었습니다."
+              echo "   - 실행된 컨테이너: 📦 $CONTAINER_NAME"
             fi
 
-            # ============================================================
-            # Docker 이미지 풀 (Pull)
-            # ============================================================
-            echo "⬇️ 배포할 Docker 이미지를 가져옵니다..."
-            docker pull "${{ secrets.DOCKERHUB_USERNAME }}/${PROJECT_NAME}:${BRANCH}"
-
-            # ============================================================
-            # 기존 컨테이너 정리
-            # ============================================================
-            echo "🧹 기존 배포 컨테이너의 존재 여부를 확인합니다..."
-            if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}$"; then
-              echo "⚠️ 이전에 배포된 컨테이너가 존재하여 중지 및 삭제를 진행합니다."
-              docker rm -f "$CONTAINER_NAME"
-              echo "✅ 기존 컨테이너가 성공적으로 삭제되었습니다."
-            else
-              echo "ℹ️ 새로 배포할 컨테이너와 이름이 같은 기존 컨테이너가 없습니다."
-            fi
-
-            # ============================================================
-            # 호스트 디렉토리 준비
-            # ============================================================
-            echo "📂 컨테이너에 연결할 호스트 디렉토리를 준비합니다..."
-            echo "DEBUG: PROJECT_BASE_PATH='$PROJECT_BASE_PATH'"
-            echo "DEBUG: HOST_MOUNT_PATH='$HOST_MOUNT_PATH'"
-
-            mkdir -p "$HOST_MOUNT_PATH"
-
-            # ============================================================
-            # 새 컨테이너 실행
-            # ============================================================
-            echo "🚀 새로운 애플리케이션 컨테이너를 실행합니다..."
-            docker run -d \
-              -p "${PORT}:8000" \
-              --name "$CONTAINER_NAME" \
-              $ENV_FILE_OPTION \
-              -e TZ=Asia/Seoul \
-              -v /etc/localtime:/etc/localtime:ro \
-              -v "${HOST_MOUNT_PATH}:${CONTAINER_MOUNT_PATH}" \
-              "${{ secrets.DOCKERHUB_USERNAME }}/${PROJECT_NAME}:${BRANCH}"
-
-            # ============================================================
-            # 사용하지 않는 Docker 이미지 정리 (선택 사항)
-            # ============================================================
-            echo "🧹 사용하지 않는 Docker 이미지를 정리합니다..."
-            docker image prune -f
-
-            # ============================================================
-            # 배포 완료 확인
-            # ============================================================
-            echo "🥂 배포가 성공적으로 완료되었습니다."
-            echo "   - 실행된 컨테이너: 📦 $CONTAINER_NAME"
+      - name: 배포 알림 전송
+        if: ${{ always() && secrets.DISCORD_WEBHOOK_URL != '' }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" = "success" ]; then
+            EMOJI="✅"
+          else
+            EMOJI="❌"
+          fi
+          curl -s -H "Content-Type: application/json" \
+            -d "{\"content\": \"${EMOJI} **[${{ github.ref_name }}] 배포 ${STATUS}** - ${{ github.repository }} (${GITHUB_SHA::7})\"}" \
+            "$DISCORD_WEBHOOK_URL"

@@ -1,0 +1,24 @@
+# Docker Compose 배포 모드 사용 시 참고할 예시 파일입니다.
+# 이 파일을 docker-compose.yml로 복사하여 프로젝트에 맞게 수정하세요.
+#
+# .env 파일에 아래 변수들이 자동으로 설정됩니다:
+#   DOCKER_IMAGE, HOST_PORT, CONTAINER_PORT,
+#   HOST_MOUNT_PATH, CONTAINER_MOUNT_PATH
+
+services:
+  app:
+    image: ${DOCKER_IMAGE}
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT}:${CONTAINER_PORT:-8000}"
+    volumes:
+      - ${HOST_MOUNT_PATH}:${CONTAINER_MOUNT_PATH}
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Seoul
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
