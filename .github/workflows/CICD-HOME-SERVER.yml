@@ -17,6 +17,9 @@ on:
       - test     # 테스트 환경 배포
   workflow_dispatch:   # 수동 실행 허용
 
+permissions:
+  contents: read
+
 # ===================================================================
 # 동시 배포 방지
 # ===================================================================
@@ -47,6 +50,7 @@ jobs:
             if [[ ! $key =~ ^#.*$ ]] && [[ -n $key ]] && [[ ! $key =~ ^[[:space:]]*$ ]]; then
               key=$(echo "$key" | xargs)
               value=$(echo "$value" | xargs)
+              echo "::add-mask::${value}"
               echo "${key}=${value}" >> $GITHUB_OUTPUT
             fi
           done < .github/config/deploy.env
@@ -121,6 +125,7 @@ jobs:
             if [[ ! $key =~ ^#.*$ ]] && [[ -n $key ]] && [[ ! $key =~ ^[[:space:]]*$ ]]; then
               key=$(echo "$key" | xargs)
               value=$(echo "$value" | xargs)
+              echo "::add-mask::${value}"
               echo "${key}=${value}" >> $GITHUB_OUTPUT
             fi
           done < .github/config/deploy.env
@@ -133,7 +138,7 @@ jobs:
 
       - name: Docker Compose 파일 전송
         if: ${{ steps.config.outputs.DEPLOY_MODE == 'compose' }}
-        uses: appleboy/scp-action@v0.1.7
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -143,7 +148,7 @@ jobs:
           target: "${{ steps.config.outputs.PROJECT_BASE_PATH }}/${{ steps.config.outputs.PROJECT_FOLDER_NAME }}"
 
       - name: Deploy
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -165,6 +170,15 @@ jobs:
             PRODUCTION_PORT="${{ steps.config.outputs.PRODUCTION_PORT }}"
             DEVELOPMENT_PORT="${{ steps.config.outputs.DEVELOPMENT_PORT }}"
             TEST_PORT="${{ steps.config.outputs.TEST_PORT }}"
+
+            # ============================================================
+            # 경로 순회 검증
+            # ============================================================
+            if echo "$PROJECT_SUB_PATH" | grep -q '\.\.'; then
+              echo "❌ PROJECT_SUB_PATH에 '..'이 포함되어 있습니다. 경로 순회 공격 방지를 위해 중단합니다."
+              exit 1
+            fi
+
             HOST_MOUNT_PATH="${PROJECT_BASE_PATH}/${PROJECT_FOLDER_NAME}/${PROJECT_SUB_PATH}"
             CONTAINER_MOUNT_PATH="/mnt/${PROJECT_FOLDER_NAME}"
 
@@ -220,11 +234,12 @@ jobs:
 
               # .env 파일에 배포 변수 추가 (compose 치환용)
               DEPLOY_VARS="DOCKER_IMAGE=${DOCKER_IMAGE}
-HOST_PORT=${PORT}
-CONTAINER_PORT=${CONTAINER_PORT:-8000}
-HOST_MOUNT_PATH=${HOST_MOUNT_PATH}
-CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
+            HOST_PORT=${PORT}
+            CONTAINER_PORT=${CONTAINER_PORT:-8000}
+            HOST_MOUNT_PATH=${HOST_MOUNT_PATH}
+            CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
 
+              umask 077
               if [ -n "${{ secrets.PROJECT_ENV }}" ]; then
                 echo "${DEPLOY_VARS}" > .env
                 echo "" >> .env
@@ -232,7 +247,6 @@ CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
               else
                 echo "${DEPLOY_VARS}" > .env
               fi
-              chmod 600 .env
 
               # Docker Compose Pull & Deploy
               echo "⬇️ Docker Compose 이미지를 가져옵니다..."
@@ -276,9 +290,9 @@ CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
               ENV_FILE_OPTION=""
               if [ -n "${{ secrets.PROJECT_ENV }}" ]; then
                 echo "📝 GitHub Secrets에 PROJECT_ENV가 존재합니다. 원격 서버에 .env 파일을 생성합니다..."
+                umask 077
                 echo "${{ secrets.PROJECT_ENV }}" > .env
-                chmod 600 .env
-                ENV_FILE_OPTION="--env-file .env"
+                ENV_FILE_OPTION="yes"
                 echo "✅ .env 파일이 성공적으로 생성되었습니다."
               else
                 echo "ℹ️ GitHub Secrets에 PROJECT_ENV가 존재하지 않습니다. .env 파일 생성을 건너뜁니다."
@@ -311,13 +325,20 @@ CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
                 --restart unless-stopped \
                 --log-opt max-size=10m \
                 --log-opt max-file=3 \
+                --security-opt=no-new-privileges:true \
+                --cap-drop=ALL \
+                --pids-limit 512 \
+                --memory 512m \
                 -p "${PORT}:${CONTAINER_PORT:-8000}" \
                 --name "$CONTAINER_NAME" \
-                $ENV_FILE_OPTION \
+                $([ "$ENV_FILE_OPTION" = "yes" ] && echo "--env-file .env") \
                 -e TZ=Asia/Seoul \
                 -v /etc/localtime:/etc/localtime:ro \
                 -v "${HOST_MOUNT_PATH}:${CONTAINER_MOUNT_PATH}" \
                 "${DOCKER_IMAGE}"
+                # 필요 시 아래 옵션을 추가하세요:
+                # --read-only           # 컨테이너 파일시스템 읽기 전용 (tmpfs 마운트 필요할 수 있음)
+                # --user 1000:1000      # non-root 사용자로 실행
 
               # Health Check
               echo "🏥 컨테이너 상태를 확인합니다..."
@@ -356,4 +377,4 @@ CONTAINER_MOUNT_PATH=${CONTAINER_MOUNT_PATH}"
           fi
           curl -s -H "Content-Type: application/json" \
             -d "{\"content\": \"${EMOJI} **[${{ github.ref_name }}] 배포 ${STATUS}** - ${{ github.repository }} (${GITHUB_SHA::7})\"}" \
-            "$DISCORD_WEBHOOK_URL"
+            "$DISCORD_WEBHOOK_URL" 2>/dev/null || true
